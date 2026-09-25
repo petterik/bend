@@ -3379,6 +3379,7 @@ function compile_segs(fl: File): string {
 }
 
 export function compile_book(book: Bend.Book): string {
+  REACH.clear();
   const cb = carb_book(book, ["main", ...RUNTIME_ADTS]);
   const show = show_main(book);
   const facts = () => cb.own.size + cb.hot.size + cb.stat.size;
@@ -3665,6 +3666,7 @@ function js_def(fl: File, k: Name, def: Def): void {
 
 export function js_lib(book: Bend.Book, roots: Name[],
   outs: Name[] | null): string {
+  REACH.clear();
   const cb = carb_book(book, roots.slice());
   const fl = file_new(cb, true);
   fl.tab = 0;
