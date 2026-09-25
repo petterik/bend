@@ -587,6 +587,8 @@ const NODES: Map<Name, Lay> = new Map();
 
 const LAYS: Map<string, Lay> = new Map();
 
+const REACH: Map<string, Set<Name>> = new Map();
+
 const CYCLES: Map<Name, boolean> = new Map();
 
 const CONSTS: Map<HTerm, boolean> = new Map();
@@ -3164,7 +3166,23 @@ function emit_match(fl: File, x: Of<"Mat"> | Of<"Efq">,
         : v.lay.arms![0].fs.slice(0, e).map((f) => val_field(v, f));
     }]);
   } else {
-    lv = mat_ctrs(fl, x, adt, adt.k === "IO.OP").map(([k, h]) => {
+    // A live field of an empty datatype makes its constructor unreachable.
+    // Keep the original layout so generic functions retain one ABI.
+    const tld = fl.book.tlds[adt.k];
+    const reachable = tld?.$ === "ADT" ? memo(REACH,
+      Bend.term_key(Bend.term_lower(adt)), () => new Set(tld.c
+        .filter((ctr) => !ctr_doms(fl.book, ctr, adt.x).some((A) => {
+          const t = ty_adt(fl.book, A);
+          const d = t === null ? null : fl.book.tlds[t.k];
+          return d?.$ === "ADT" && d.c.length === 0;
+        })).map((ctr) => ctr.k))) : null;
+    const present = mat_ctrs(fl, x, adt, adt.k === "IO.OP")
+      .filter(([k]) => k === "" || reachable === null || reachable.has(k));
+    const complete = adt.k !== "IO.OP" && reachable !== null
+      && reachable.size > 0 && [...reachable]
+        .every((k) => present.some(([p]) => p === k));
+    lv = (complete ? present.filter(([k]) => k !== "") : present)
+      .map(([k, h]) => {
       if (k === "") {
         return ["", h, () => [u]];
       }
