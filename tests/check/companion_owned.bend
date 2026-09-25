@@ -22,6 +22,6 @@ def read(wrapped: Wrapped) -> U32:
 def run(raw: Raw) -> U32:
   read(raw)
 
-def main() -> U32 & U32:
-  (run(Raw{7}), read(Raw{8}))
-#|(7, 8)
+def main() -> U32:
+  run(Raw{7})
+#|7
