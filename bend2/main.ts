@@ -802,21 +802,36 @@ function book_main(book: Bend.Book): Bend.Def | null {
     || (main.v === null && main.i === undefined) ? null : main;
 }
 
-// Only definitions whose checker inserted a companion need their checked
-// bodies for value-mode normalization. Leave all other source bodies alone:
-// they preserve the readable surface spelling of stuck template calls.
-function book_for_value_run(book: Bend.Book): Bend.Book {
-  if (book.companion_rewrites.size === 0) {
-    return book;
-  }
-  const tlds = { ...book.tlds };
-  for (const name of book.companion_rewrites) {
-    const tld = tlds[name];
-    if (tld?.$ === "Def" && tld.e !== undefined && tld.x === 0 && tld.v !== null) {
-      tlds[name] = { ...tld, v: Bend.term_higher(tld.e) };
+// A value-mode caller must use its checked body if checking inserted a
+// companion or solved implicit leading template arguments. Otherwise the
+// original body can expose an unresolved ?AUTO after normalization. Preserve
+// the surface body for all other definitions, including stuck template calls.
+function has_auto(term: Bend.LTerm): boolean {
+  const stack: unknown[] = [term];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (Array.isArray(value)) {
+      for (const child of value) stack.push(child);
+    } else if (value !== null && typeof value === "object") {
+      const node = value as Record<string, unknown>;
+      if (node.$ === "Hol" && node.k === "AUTO") return true;
+      for (const [key, child] of Object.entries(node)) {
+        if (key !== "s") stack.push(child);
+      }
     }
   }
-  return { ...book, tlds };
+  return false;
+}
+
+function book_for_value_run(book: Bend.Book): Bend.Book {
+  let tlds: Bend.Book["tlds"] | null = null;
+  for (const [name, tld] of Object.entries(book.tlds)) {
+    if (tld.$ !== "Def" || tld.e === undefined || tld.x !== 0 || tld.v === null) continue;
+    if (!book.companion_rewrites.has(name) && !has_auto(Bend.term_lower(tld.v))) continue;
+    tlds ??= { ...book.tlds };
+    tlds[name] = { ...tld, v: Bend.term_higher(tld.e) };
+  }
+  return tlds === null ? book : { ...book, tlds };
 }
 
 function book_run(book: Bend.Book, n0: number, argv: string[]): number {
