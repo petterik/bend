@@ -316,7 +316,11 @@ export type Ctrs = Array<Ctr>;
 export type ADT  = { $: "ADT"; n: number; g: number; T: HTerm; c: Ctrs; b?: Bool; };
 export type Def  = { $: "Def"; n: number; x: number; T: HTerm; v: HTerm | null; e?: LTerm; b?: Bool; u?: Bool; i?: string[]; m?: string; };
 export type TLD  = ADT | Def;
-export type Book = { tlds: Record<Name, TLD>; ctrs: Record<Name, Ctr>; order: Name[]; hols: number; open: number; tmps: Record<Name, Record<string, Name>>; };
+export type Book = {
+  tlds: Record<Name, TLD>; ctrs: Record<Name, Ctr>; order: Name[];
+  hols: number; open: number; tmps: Record<Name, Record<string, Name>>;
+  companion_rewrites: Set<Name>;
+};
 
 // Context
 export type Ann = { q: Quant; k: Name; T: HTerm };
@@ -977,7 +981,8 @@ export function ctrs_find(cs: Ctrs, k: Name): Ctr | null {
 // ====
 
 export function book_nil(): Book {
-  return { tlds: Object.create(null), ctrs: Object.create(null), order: [], hols: 0, open: 0, tmps: Object.create(null) };
+  return { tlds: Object.create(null), ctrs: Object.create(null), order: [],
+    hols: 0, open: 0, tmps: Object.create(null), companion_rewrites: new Set() };
 }
 
 export function book_ctr(book: Book, k: Name): Ctr | null {
@@ -3562,6 +3567,8 @@ export function term_check(book: Book, lhs: LHS, tm: HTerm, qt: Quant, ty: HTerm
       const inferred = term_infer(book, lhs, tm, qt, ctx, d);
       const method = companion_method(book, inferred.ty, expected);
       if (method !== null) {
+        // The normalizer otherwise unfolds the original, unconverted body.
+        book.companion_rewrites.add(lhs.def);
         return term_check(book, lhs, companion_call(book, method, tm), qt, ty, ctx, d);
       }
       if (term_compare("LE", book, inferred.ty, ty, d)) {

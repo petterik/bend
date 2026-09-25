@@ -784,6 +784,7 @@ async function book_read(file: string, base?: Bend.Book,
 
 function book_seed(base: Bend.Book): Bend.Book {
   const book = Bend.book_nil();
+  book.companion_rewrites = new Set(base.companion_rewrites);
   for (const k of Object.keys(base.tlds)) {
     book.tlds[k] = { ...base.tlds[k] };
   }
@@ -801,6 +802,23 @@ function book_main(book: Bend.Book): Bend.Def | null {
     || (main.v === null && main.i === undefined) ? null : main;
 }
 
+// Only definitions whose checker inserted a companion need their checked
+// bodies for value-mode normalization. Leave all other source bodies alone:
+// they preserve the readable surface spelling of stuck template calls.
+function book_for_value_run(book: Bend.Book): Bend.Book {
+  if (book.companion_rewrites.size === 0) {
+    return book;
+  }
+  const tlds = { ...book.tlds };
+  for (const name of book.companion_rewrites) {
+    const tld = tlds[name];
+    if (tld?.$ === "Def" && tld.e !== undefined && tld.x === 0 && tld.v !== null) {
+      tlds[name] = { ...tld, v: Bend.term_higher(tld.e) };
+    }
+  }
+  return { ...book, tlds };
+}
+
 function book_run(book: Bend.Book, n0: number, argv: string[]): number {
   const main = book_main(book);
   if (main === null) {
@@ -810,7 +828,9 @@ function book_run(book: Bend.Book, n0: number, argv: string[]): number {
   if (Comp.io_type(book) !== null) {
     return Comp.io_run(book, argv);
   }
-  const snf = Bend.term_snf(book, main.v as Bend.HTerm);
+  const evaluated = book_for_value_run(book);
+  const evaluated_main = book_main(evaluated) as Bend.Def;
+  const snf = Bend.term_snf(evaluated, evaluated_main.v as Bend.HTerm);
   cli_say(1, Bend.term_show(Bend.term_lower(snf)) + "\n");
   return 0;
 }
