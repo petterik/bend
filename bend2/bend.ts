@@ -3991,6 +3991,12 @@ export function def_inst(book: Book, lhs: LHS, tm: Extract<HTerm, { $: "Ref" }>,
   } else if (book.tlds[is[key]].v === null && is[key] !== lhs.def) {
     throw Err(book, ctx, "a decreasing self-call (arguments are read left to right: each passed unchanged until one shrinks)", tm, tm.s, lhs.def);
   }
+  // A checked caller refers to the specialized definition. If that instance
+  // contains an inserted companion, value-mode normalization must use the
+  // caller's checked body too, so it reaches the specialization.
+  if (book.companion_rewrites.has(is[key])) {
+    book.companion_rewrites.add(lhs.def);
+  }
   return is[key];
 }
 
