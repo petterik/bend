@@ -2148,7 +2148,12 @@ export function parse_term_ops(p: Parse, tm: LTerm, lvl: number): LTerm {
         parse_skip(p);
         parse_take(p, ",");
       }
-      const xs = ts.concat(parse_term_args(p, ")"));
+      // Missing trailing ~ arguments may be inferred from checked
+      // runtime-argument types; reject ambiguous or open cases.
+      const autos = ts.length < x
+        ? Array.from({ length: x - ts.length }, () => Hol("AUTO", out.s))
+        : [];
+      const xs = ts.concat(autos, parse_term_args(p, ")"));
       const s  = parse_grow(p, out);
       for (const a of xs) {
         out = App(out, a, s);
@@ -3546,6 +3551,33 @@ export function term_check_kind(book: Book, lhs: LHS, T: HTerm, q: Quant, ctx: C
 }
 
 export function term_check(book: Book, lhs: LHS, tm: HTerm, qt: Quant, ty: HTerm, ctx: Ctx, d: number): Check {
+  // Reuse the already checked inference result on ordinary inferable forms.
+  // Inferring an application twice can instantiate templates twice.
+  if (qt.$ === "Lone" && tm.$ === "Ctr") {
+    const expected = term_strip(term_wnf(book, ty));
+    if (expected.$ === "ADT" && book.tlds[expected.k + ".allow_companion"] !== undefined) {
+      const converted = companion_constructor(book, tm, expected,
+        expected.x[0] ?? Typ(Qua(Lone())));
+      if (converted !== null) {
+        return term_check(book, lhs, converted, qt, ty, ctx, d);
+      }
+    }
+  }
+  if (qt.$ === "Lone" && (tm.$ === "Var" || tm.$ === "App"
+    || tm.$ === "Ann" || tm.$ === "Ref")) {
+    const expected = term_strip(term_wnf(book, ty));
+    if (expected.$ === "ADT" && book.tlds[expected.k + ".allow_companion"] !== undefined) {
+      const inferred = term_infer(book, lhs, tm, qt, ctx, d);
+      const method = companion_method(book, inferred.ty, expected);
+      if (method !== null) {
+        return term_check(book, lhs, companion_call(book, method, tm), qt, ty, ctx, d);
+      }
+      if (term_compare("LE", book, inferred.ty, ty, d)) {
+        return { tm: inferred.tm, us: inferred.us };
+      }
+      throw Err(book, ctx, ty, inferred.ty, tm.s, lhs.def);
+    }
+  }
   switch (tm.$) {
     // a share cell in a goal-checked position: open it, no evaluation
     case "Var": {
@@ -3805,8 +3837,160 @@ export function def_check(book: Book, k: Name, def: Def, z?: number): LTerm {
 // is), term_key of their syntax picks it, and the first call mints it,
 // the def's body and type at them, checked as a def one level deeper:
 // 64 levels stop a template that instantiates itself without end
-export function def_inst(book: Book, lhs: LHS, tm: Extract<HTerm, { $: "Ref" }>, def: Def, sp: HTerm[], ctx: Ctx, d: number): Name {
+// Experimental, name-independent inference for explicit ~?AUTO placeholders.
+// It only solves leading template arguments that appear structurally in
+// checked runtime-argument types. No arbitrary unification or runtime value
+// evaluation is attempted.
+// Isolated experiment: a nominal value may convert to a nominal expected type
+// through one method owned by its defining type. The method name is derived
+// from the expected type's simple name, not from a collection registry.
+function companion_marked(book: Book, expected: HTerm): boolean {
+  const e = term_strip(term_wnf(book, expected));
+  if (e.$ !== "ADT") return false;
+  const marker = book.tlds[e.k + ".allow_companion"];
+  if (marker?.$ !== "Def" || marker.n !== 0 || marker.x !== 0
+    || marker.v === null) return false;
+  const marker_result = term_strip(term_wnf(book, marker.T));
+  if (marker_result.$ !== "ADT" || marker_result.k !== "Unit"
+    || marker_result.x.length !== 0) return false;
+  return true;
+}
+
+function companion_method(book: Book, actual: HTerm, expected: HTerm): Name | null {
+  const a = term_strip(term_wnf(book, actual));
+  return a.$ === "ADT" ? companion_method_owner(book, a.k, expected) : null;
+}
+
+function companion_method_owner(book: Book, owner: Name, expected: HTerm): Name | null {
+  const e = term_strip(term_wnf(book, expected));
+  if (e.$ !== "ADT" || owner === e.k || !companion_marked(book, e)) return null;
+  const simple = e.k.slice(e.k.lastIndexOf(".") + 1);
+  if (simple.length === 0) return null;
+  const suffix = simple[0].toLowerCase() + simple.slice(1);
+  const own = owner + "." + suffix;
+  const own_def = book.tlds[own];
+  if (own_def?.$ === "Def" && own_def.v !== null) return own;
+  // Base cannot import the protocol library. For a Base-owned nominal type,
+  // let that protocol's own module define its one canonical adapter instead.
+  if (book.tlds[owner]?.b !== true) return null;
+  const target_module = e.k.slice(0, e.k.lastIndexOf("."));
+  const extension = target_module + "." + owner + "." + suffix;
+  const extension_def = book.tlds[extension];
+  return extension_def?.$ === "Def" && extension_def.v !== null ? extension : null;
+}
+
+// A constructor has a known nominal owner even when its element type cannot
+// be inferred. One method template may be instantiated from the target's
+// element index; the ordinary checker then validates every constructor field.
+// This is bounded by the one owner method and does no instance search.
+function companion_constructor(book: Book, tm: HTerm, expected: HTerm,
+  element: HTerm): HTerm | null {
+  if (tm.$ !== "Ctr" || book_ctr(book, tm.k) === null) return null;
+  const method = companion_method_owner(book, book_fam(book, tm.k), expected);
+  if (method === null) return null;
+  const def = book.tlds[method] as Def;
+  if (def.x > 1 || def.n !== def.x + 1) return null;
+  let out: HTerm = Ref(method, tm.s);
+  if (def.x === 1) out = App(out, element, tm.s);
+  return App(out, tm, tm.s);
+}
+
+function companion_call(book: Book, method: Name, arg: HTerm): HTerm {
+  const def = book.tlds[method] as Def;
+  let out: HTerm = Ref(method, arg.s);
+  for (let i = 0; i < def.x; i++) out = App(out, Hol("AUTO", arg.s), arg.s);
+  return App(out, arg, arg.s);
+}
+function infer_template_autos(book: Book, lhs: LHS, tm: Extract<HTerm, { $: "Ref" }>,
+  def: Def, sp: HTerm[], ctx: Ctx, d: number): HTerm[] {
   const xs = sp.slice(0, def.x);
+  const autos = xs.map((a, i) => a.$ === "Hol" && a.k === "AUTO" ? i : -1)
+    .filter((i) => i >= 0);
+  if (autos.length === 0) return xs;
+  if (sp.length <= def.x) {
+    throw Err(book, ctx, "a runtime argument whose type determines ~?AUTO", tm, tm.s, lhs.def);
+  }
+  let T = def.T;
+  const marks = new Map<number, HTerm>();
+  for (let i = 0; i < def.x; i++) {
+    const h = tele_head(book, T, ctx, lhs.def, tm.s);
+    const a = autos.includes(i) ? Hol("__AUTO_" + i, tm.s) : xs[i];
+    if (autos.includes(i)) marks.set(i, a);
+    T = h.B(a);
+  }
+  const found = new Map<number, HTerm>();
+  const deferred: { want: HTerm; arg: HTerm }[] = [];
+  let fuel = 512;
+  const unify = (want: HTerm, got: HTerm): boolean => {
+    if (--fuel < 0) return false;
+    const w = term_strip(term_wnf(book, want));
+    const g = term_strip(term_wnf(book, got));
+    if (w.$ === "Hol" && w.k.startsWith("__AUTO_")) {
+      const i = Number(w.k.slice(7));
+      // Match the internal node itself, not a forgeable user-written hole.
+      if (w !== marks.get(i)) return false;
+      const prior = found.get(i);
+      if (prior !== undefined) return term_compare("EQ", book, prior, g, d);
+      found.set(i, g);
+      return true;
+    }
+    if (w.$ === "ADT" && g.$ === "ADT"
+      && w.k === g.k && w.x.length === g.x.length) {
+      return w.x.every((a, i) => unify(a, g.x[i]));
+    }
+    return term_compare("EQ", book, w, g, d);
+  };
+  let last: HTerm = tm;
+  for (let j = def.x; j < sp.length && found.size < autos.length; j++) {
+    const h = tele_head(book, T, ctx, lhs.def, tm.s);
+    const arg = sp[j];
+    // These forms require an expected type. Do not speculate on them, and
+    // especially do not swallow an error from an inferable application:
+    // inference can instantiate templates and mutate the checked book.
+    if (arg.$ === "Lam" || arg.$ === "Let" || arg.$ === "Ctr"
+      || arg.$ === "Mat" || arg.$ === "Efq" || arg.$ === "Rfl"
+      || arg.$ === "Rwt" || arg.$ === "Hol" || arg.$ === "Lit") {
+      if (arg.$ === "Ctr") deferred.push({ want: h.A, arg });
+      T = h.B(sp[j]);
+      continue;
+    }
+    const actual = term_infer(book, lhs, arg, Lone(), ctx, d).ty;
+    last = actual;
+    if (!unify(h.A, actual)) {
+      const method = companion_method(book, actual, h.A);
+      if (method === null) {
+        throw Err(book, ctx, "~?AUTO solved by a unique structural type match", actual, tm.s, lhs.def);
+      }
+      const converted = companion_call(book, method, arg);
+      const converted_type = term_infer(book, lhs, converted, Lone(), ctx, d).ty;
+      if (!unify(h.A, converted_type)) {
+        throw Err(book, ctx, "a companion returning the expected type", converted_type, tm.s, lhs.def);
+      }
+    }
+    T = h.B(sp[j]);
+  }
+  for (const { want, arg } of deferred) {
+    const e = term_strip(term_wnf(book, want));
+    if (e.$ !== "ADT" || e.x.length === 0) continue;
+    const first = term_strip(term_wnf(book, e.x[0]));
+    const element = first.$ === "Hol" && first.k.startsWith("__AUTO_")
+      ? found.get(Number(first.k.slice(7))) : e.x[0];
+    if (element === undefined) continue;
+    const converted = companion_constructor(book, arg, e, element);
+    if (converted === null) continue;
+    const converted_type = term_infer(book, lhs, converted, Lone(), ctx, d).ty;
+    if (!unify(want, converted_type)) {
+      throw Err(book, ctx, "a companion returning the expected type", converted_type, tm.s, lhs.def);
+    }
+  }
+  if (autos.some((i) => !found.has(i))) {
+    throw Err(book, ctx, "~?AUTO solved by a unique structural type match", last, tm.s, lhs.def);
+  }
+  for (const i of autos) xs[i] = found.get(i)!;
+  return xs;
+}
+export function def_inst(book: Book, lhs: LHS, tm: Extract<HTerm, { $: "Ref" }>, def: Def, sp: HTerm[], ctx: Ctx, d: number): Name {
+  const xs = infer_template_autos(book, lhs, tm, def, sp, ctx, d);
   if (xs.length < def.x) {
     throw Err(book, ctx, "a template applied to closed ~ arguments (a def parameter is not comptime)", tm, tm.s, lhs.def);
   }
