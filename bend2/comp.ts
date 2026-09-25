@@ -1638,6 +1638,20 @@ if (process.env.BEND_STATIC_REPORT) {
 }
 function static_fun(book: Book, t: HTerm): HTerm | null {
   STATIC_FUN_STATS.queries++;
+  // Most computed heads are ordinary partial applications. Reject them
+  // before lowering, hashing, and attempting static evaluation.
+  const spine = static_unapply(t);
+  if (spine === null) {
+    STATIC_FUN_STATS.refusals++;
+    return null;
+  }
+  const [raw_head, args] = spine;
+  const head = Bend.term_strip(raw_head);
+  const def = head.$ === "Ref" ? book.tlds[head.k] : undefined;
+  if (head.$ !== "Lam" && (def?.$ !== "Def" || args.length < def.n)) {
+    STATIC_FUN_STATS.refusals++;
+    return null;
+  }
   const lowered = Bend.term_lower(t);
   if (!static_term_closed(lowered)) {
     STATIC_FUN_STATS.misses++;

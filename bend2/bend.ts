@@ -2148,12 +2148,14 @@ export function parse_term_ops(p: Parse, tm: LTerm, lvl: number): LTerm {
         parse_skip(p);
         parse_take(p, ",");
       }
-      // Missing trailing ~ arguments may be inferred from checked
-      // runtime-argument types; reject ambiguous or open cases.
-      const autos = ts.length < x
+      // Infer missing trailing templates only for a full runtime call.
+      // Partial calls retain positional template application.
+      const args = parse_term_args(p, ")");
+      const autos = ts.length < x && hd?.$ === "Def"
+        && args.length === hd.n - x
         ? Array.from({ length: x - ts.length }, () => Hol("AUTO", out.s))
         : [];
-      const xs = ts.concat(autos, parse_term_args(p, ")"));
+      const xs = ts.concat(autos, args);
       const s  = parse_grow(p, out);
       for (const a of xs) {
         out = App(out, a, s);
